@@ -1,5 +1,6 @@
 import plotly.graph_objects as go
 import numpy as np
+# Visuals 3D Module - Updated for Engineering Dashboard
 
 # --- 1. MATERIALS (Matte & Dark Mode) ---
 MATERIALS = {
