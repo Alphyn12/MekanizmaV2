@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 from kinematics import FourBarLinkage, SliderCrankMechanism, InvertedSliderCrankMechanism, analyze_cycle, calculate_full_cycle
-from visuals import draw_mechanism, create_animation_figure, plot_kinematic_curves, plot_transmission_angle, draw_fbd_separate
+from visuals import draw_mechanism, create_animation_figure, plot_kinematic_curves, plot_transmission_angle, draw_fbd_separate, plot_sn_curve
 from visuals_3d import draw_mechanism_3d
 from report_generator import create_pdf, generate_matlab_code, generate_excel_report
 import pandas as pd
@@ -9,7 +9,10 @@ from solvers.fourbar_solver import FourBarSolver
 import stress
 import exporters
 import fatigue
+import materials
 import arduino_gen
+from solvers.slidercrank_solver import SliderCrankSolver
+import itertools
 # ... existing imports ...
 
 # ... existing imports ...
@@ -134,20 +137,27 @@ if enable_dynamics:
         P_gas = st.sidebar.number_input("P_gas (N)", value=get_default("P_gas", 0.0))
         dyn_params = {"m2":m2, "J2":J2, "O2G2":O2G2, "m3":m3, "J3":J3, "BG3":BG3, "m4":m4, "P_gas":P_gas}
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Mukavemet Kontrolü (Beta)")
-    enable_stress = st.sidebar.checkbox("Gerilme Analizi Aktif", value=False)
+# --- NEW: ENGINEERING MODULES SIDEBAR ---
+with st.sidebar.expander("Mukavemet & Malzeme", expanded=True):
+    enable_stress = st.checkbox("Analizi Aktif Et", value=False)
     stress_params = {}
     if enable_stress:
-         sel_mat = st.sidebar.selectbox("Malzeme Seçimi", list(stress.MATERIALS.keys()))
-         st.sidebar.caption(f"Akma Dayanımı: {stress.MATERIALS[sel_mat]} MPa")
-         area3 = st.sidebar.number_input("Biyel Kesit Alanı (mm²)", value=100.0)
-         area4 = st.sidebar.number_input("Çıkış/Piston Kesit Alanı (mm²)", value=100.0)
+         sel_mat = st.selectbox("Malzeme Seçimi", list(materials.MATERIALS_DB.keys()))
+         mat_props = materials.MATERIALS_DB[sel_mat]
+         st.caption(f"**{mat_props['name']}**")
+         st.caption(f"Akma: {mat_props['Sy']} MPa | Çekme: {mat_props['Sut']} MPa")
          
-         st.sidebar.markdown("**Yorulma Parametreleri**")
-         op_rpm = st.sidebar.number_input("Çalışma Hızı (RPM)", value=1500.0, step=100.0)
+         area_biyel = st.number_input("Biyel Kesit Alanı (mm²)", value=50.0)
          
-         stress_params = {"material_name":sel_mat, "area3":area3, "area4":area4, "rpm": op_rpm}
+         st.markdown("---")
+         st.markdown("**Yorulma**")
+         op_rpm = st.number_input("Çalışma Hızı (RPM)", value=1500.0, step=100.0)
+         
+         stress_params = {
+             "material_key": sel_mat,
+             "area_mm2": area_biyel,
+             "rpm": op_rpm
+         }
 
 # Execute Solver
 kin_state = solver.solve_kinematics(theta2, omega2, alpha2)
@@ -176,48 +186,62 @@ stats, c_data = calculate_full_cycle(mech_type, omega2, alpha2, assembly_mode_va
 # Reordered: Static First
 # --- MAIN TABS ---
 # Reordered: Static First
-tab_3d, tab_static, tab_sim, tab_graphs, tab_step, tab_data, tab_report = st.tabs(["🧊 3D STÜDYO", "STATİK GÖRÜNÜM & FBD", "SİMÜLASYON", "KİNEMATİK GRAFİKLER", "DEVRE KAPALILIK DENKLEMLERİ ÇÖZÜMÜ", "VERİ TABLOLARI", "RAPOR İNDİR"])
+tab_static, tab_sim, tab_3d, tab_graphs, tab_step, tab_data, tab_report = st.tabs(["STATİK GÖRÜNÜM & FBD", "SİMÜLASYON", "3D STÜDYO", "KİNEMATİK GRAFİKLER", "DEVRE KAPALILIK DENKLEMLERİ ÇÖZÜMÜ", "VERİ TABLOLARI", "RAPOR İNDİR"])
 
 # 0. 3D STUDIO
 with tab_3d:
-    st.markdown("### 🧊 3D Mekanizma Stüdyosu")
+    st.markdown("### 3D Mekanizma Stüdyosu")
     
     col_3d_main, col_3d_ctrl = st.columns([3, 1])
     
     with col_3d_ctrl:
+        # Wrapped in a container for visual distinction (Panel effect)
         with st.container(border=True):
-            st.subheader("🎛️ Stüdyo Kontrol")
+            st.markdown("**Görünüm Ayarları**")
             
-            st.caption("Kamera Açıları")
-            c_iso, c_front, c_top, c_side = st.columns(4)
-            if "view_3d" not in st.session_state: st.session_state.view_3d = "ISO"
+            c1, c2, c3, c4 = st.columns(4)
+            # Default View: ON (Front)
+            if "view_3d" not in st.session_state: st.session_state.view_3d = "ON"
             
-            # Compact Buttons with Icons
-            if c_iso.button("📐", key="v_iso", help="İzometrik"): st.session_state.view_3d = "ISO"
-            if c_front.button("FRONT", key="v_front", help="Ön Cephe"): st.session_state.view_3d = "ON"
-            if c_top.button("TOP", key="v_top", help="Üst Plan"): st.session_state.view_3d = "UST"
-            if c_side.button("SIDE", key="v_side", help="Yan Cephe"): st.session_state.view_3d = "YAN"
+            if c1.button("📐 ISO", key="v_iso", help="İzometrik"): st.session_state.view_3d = "ISO"
+            if c2.button("⏹️ ÖN", key="v_front", help="Ön (XY)"): st.session_state.view_3d = "ON"
+            if c3.button("⬇️ ÜST", key="v_top", help="Üst (XZ)"): st.session_state.view_3d = "UST"
+            if c4.button("➡️ YAN", key="v_side", help="Yan (YZ)"): st.session_state.view_3d = "YAN"
             
-            st.divider()
+            st.write("") # Spacer
             
-            st.caption("Simülasyon Kontrolleri")
             p_val = st.slider("Krank Açısı (°)", 0.0, 360.0, float(theta2), step=1.0)
-            thick = st.slider("Materyal Kalınlığı (mm)", 1, 20, 5, step=1)
+            thick = st.slider("Parça Kalınlığı (mm)", 1, 20, 5, step=1)
             
-            st.divider()
+            c_p, c_g = st.columns(2)
+            show_pins = c_p.checkbox("Pimleri Göster", value=True)
+            show_grid = c_g.checkbox("Izgarayı Göster", value=False) 
             
-            # Grid default OFF | Pins Locked ON
-            show_grid = st.toggle("Referans Izgarası", value=False)
-            show_pins = True 
+            # Trace Toggle
+            show_trace = st.toggle("Yörüngeyi Göster (Biyel)", value=False) 
             
-            st.info("🖱️ **Sol Tık:** Çevir\n🖱️ **Sağ Tık:** Kaydır (Pan)\n🖱️ **Tekerlek:** Zoom")
+            st.caption("💡 **İpucu:** Sol Tık: Çevir | Sağ Tık: Pan | Tekerlek: Zoom")
 
     with col_3d_main:
         # Calculate specialized 3D Position
         joints_3d = mechanism.get_position(p_val, assembly_mode_val)
         
+        # Trace Path Construction
+        trace_path_points = None
+        if show_trace and c_data and 'joints' in c_data and 'B' in c_data['joints']:
+            # Using point B for trace
+            raw_pts = c_data['joints']['B']
+            # Convert to 3D with correct Z-depth (e.g. at coupler level)
+            z_trace = thick * 1.5 # Middle of coupler layer
+            trace_path_points = [(p[0], p[1], z_trace) for p in raw_pts if p]
+
         if joints_3d:
-            fig_3d = draw_mechanism_3d(joints_3d, mech_type, show_pins=show_pins, show_grid=show_grid, thickness=thick, camera_view=st.session_state.view_3d)
+            fig_3d = draw_mechanism_3d(
+                joints_3d, mech_type, 
+                show_pins=show_pins, show_grid=show_grid, thickness=thick, 
+                camera_view=st.session_state.view_3d,
+                trace_path=trace_path_points if show_trace else None
+            )
             # Enable scrollZoom and ModeBar to allow better navigation
             st.plotly_chart(fig_3d, use_container_width=True, key="chart_3d_studio", 
                             config={'scrollZoom': True, 'displayModeBar': True})
@@ -427,7 +451,6 @@ with tab_sim:
              st.error("Mekanizma bu konumda geçersiz, animasyon oluşturulamadı.")
 
 # 3. KINEMATIC GRAPHS
-# 3. KINEMATIC GRAPHS
 with tab_graphs:
     # Use global c_data
     f_v, f_a, f_p = plot_kinematic_curves(
@@ -440,77 +463,115 @@ with tab_graphs:
     st.plotly_chart(f_a, use_container_width=True, key="g_acc")
     st.plotly_chart(f_p, use_container_width=True, key="g_props")
     
-    # --- MUKAVEMET ANALİZİ ---
-    if enable_dynamics and enable_stress and 'F12' in c_data:
+    # --- ENGINEERING ANALYSIS (NEW) ---
+    if enable_dynamics and enable_stress and 'F23' in c_data:
         st.markdown("---")
-        st.subheader("🛡️ Mukavemet ve Güvenlik Analizi")
+        st.header("🛡️ Mühendislik Analizi Raporu")
         
-        # Calculate Stress
-        if 'material_name' in stress_params:
-            s_res = stress.analyze_cycle_safety(c_data, stress_params['material_name'], stress_params['area3'], stress_params['area4'])
+        # 0. Physical Properties
+        st.subheader("1. Fiziksel Özellikler (Tahmini)")
+        if 'material_key' in stress_params:
+            mat_key = stress_params['material_key']
+            den = materials.MATERIALS_DB[mat_key]['density'] # g/cm3
             
-            # Plot Stress
+            # Simple Mass Calc (g)
+            l_biyel = L3 if mech_type=="Dört Çubuk Mekanizması" else l
+            # Volume (cm3) = Length(cm) * Area(cm2)
+            # Area input is mm2 -> /100 = cm2
+            vol_coupler_cm3 = (l_biyel / 10.0) * (stress_params['area_mm2'] / 100.0) 
+            mass_coupler = vol_coupler_cm3 * den
+            
+            # Total Mass Estimate (Rough)
+            # Assuming Crank/Rocker have similar cross-section for simplicity or user ignored
+            
+            c_mat1, c_mat2 = st.columns(2)
+            c_mat1.metric(f"Biyel Kütlesi ({materials.MATERIALS_DB[mat_key]['name']})", f"{mass_coupler:.1f} g")
+            c_mat2.metric(f"Malzeme Yoğunluğu", f"{den} g/cm³")
+
+        # 1. Stress Analysis
+        st.subheader("2. Mukavemet ve Güvenlik Analizi (Biyel Uzvu)")
+        
+        forces_biyel = c_data['F23'] # Forces on Coupler (Joint A/B)
+        
+        # Calculate Logic
+        s_res = stress.calculate_stress_safety(
+            forces_biyel, 
+            stress_params['area_mm2'], 
+            stress_params['material_key']
+        )
+        
+        if s_res:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Maksimum Gerilme", f"{s_res['sigma_max_abs']:.1f} MPa")
+            
+            delta_col = "normal"
+            if s_res['fos'] < 1.0: delta_col = "inverse"
+            c2.metric("Güvenlik Faktörü (FOS)", f"{s_res['fos']:.2f}", delta="Riskli" if s_res['fos'] < 1.0 else "Güvenli", delta_color=delta_col)
+            
+            c3.metric("Malzeme Akma Limiti", f"{s_res['Sy']} MPa")
+            
+            if not s_res['is_safe']:
+                st.error(f"⚠️ DİKKAT: Biyel uzvu üzerindeki gerilme ({s_res['sigma_max_abs']:.1f} MPa), malzeme akma sınırını aşıyor! Lütfen kesit alanını artırın.")
+
+            # Plot Stress Cycle
             import plotly.graph_objects as go
             fig_stress = go.Figure()
-            fig_stress.add_trace(go.Scatter(x=c_data['theta2'], y=s_res['sigma3'], name="Biyel Gerilmesi (σ3)", line=dict(color='orange')))
-            try: 
-                fig_stress.add_trace(go.Scatter(x=c_data['theta2'], y=s_res['sigma4'], name="Çıkış Gerilmesi (σ4)", line=dict(color='cyan')))
-            except: pass
+            fig_stress.add_trace(go.Scatter(x=c_data['theta2'], y=s_res['sigma'], name="Gerilme (σ)", line=dict(color='#FF5252', width=2)))
+            fig_stress.add_hline(y=s_res['Sy'], line_dash="dash", line_color="orange", annotation_text="Akma Sınırı (Sy)")
+            fig_stress.add_hline(y=-s_res['Sy'], line_dash="dash", line_color="orange")
             
-            # Yield Line
-            yield_val = s_res['yield_strength']
-            fig_stress.add_hline(y=yield_val, line_dash="dash", line_color="red", annotation_text=f"Akma Sınırı ({yield_val} MPa)")
-            
-            fig_stress.update_layout(title="Gerilme Analizi (MPa)", xaxis_title="Krank Açısı (deg)", yaxis_title="Gerilme (MPa)", template="plotly_dark")
+            fig_stress.update_layout(
+                title="Çevrimsel Gerilme Analizi", 
+                xaxis_title="Krank Açısı (°)", 
+                yaxis_title="Normal Gerilme (MPa)", 
+                template="plotly_dark",
+                height=400
+            )
             st.plotly_chart(fig_stress, use_container_width=True)
-            
-            # Safety Factor Metrics
-            m1, m2 = st.columns(2)
-            min_fos3 = s_res['min_fos3']
-            min_fos4 = s_res['min_fos4']
-            
-            m1.metric("Min. FOS (Biyel)", f"{min_fos3:.2f}", delta="Riskli" if min_fos3 < 1.0 else "Güvenli", delta_color="inverse")
-            m2.metric("Min. FOS (Çıkış)", f"{min_fos4:.2f}", delta="Riskli" if min_fos4 < 1.0 else "Güvenli", delta_color="inverse")
-            
-            if min_fos3 < 1.0 or min_fos4 < 1.0:
-                st.error("⚠️ UYARI: Bazı uzuvlarda akma mukavemeti aşılıyor! Kesit alanını artırın veya malzemeyi değiştirin.")
 
-            # --- YORULMA ANALİZİ ---
-            st.markdown("---")
-            st.subheader("⏳ Yorulma ve Ömür Analizi (Biyel Uzvu)")
+            # 2. Fatigue Analysis
+            st.subheader("3. Yorulma Ömrü Analizi")
             
-            # Prepare Data for Biyel (Critical Link)
-            sig3_vals = s_res['sigma3']
-            max_s3 = max(sig3_vals) if sig3_vals else 0
-            min_s3 = min(sig3_vals) if sig3_vals else 0
+            f_res = fatigue.calculate_fatigue_life(
+                s_res['sigma_max'], 
+                s_res['sigma_min'], 
+                stress_params['material_key'], 
+                stress_params['rpm']
+            )
             
-            rpm_val = stress_params.get('rpm', 1500.0)
-            mat_name = stress_params.get('material_name', 'Celik (AISI 1050)')
-            
-            # Map simplified material name to fatigue lib name rough match or use Steel default
-            fat_mat = "Celik (AISI 1050)"
-            if "Aluminyum" in mat_name or "Al" in mat_name: fat_mat = "Aluminyum (6061-T6)"
-            elif "Titan" in mat_name: fat_mat = "Titanyum (Ti-6Al-4V)"
-            elif "Dokme" in mat_name or "G40" in mat_name: fat_mat = "Dökme Demir (G40)"
-            
-            f_res = fatigue.calculate_fatigue_life(max_s3, min_s3, fat_mat, rpm_val)
-            
-            # Metrics
             f1, f2, f3 = st.columns(3)
-            life_str = "SONSUZ (>10^8)" if f_res['N'] > 1e8 else f"{f_res['N']:.0f}"
+            cycle_txt = "Sonsuz (>10⁷)" if f_res['life_cycles'] == float('inf') or f_res['life_cycles'] > 1e7 else f"{int(f_res['life_cycles']):,}"
             
-            f1.metric("Tahmini Ömür (Çevrim)", life_str)
+            hours = f_res['life_hours']
+            time_txt = "Sonsuz"
+            if hours != float('inf'):
+                 if hours > 24*365:
+                     time_txt = f"{hours/(24*365):.1f} Yıl"
+                 else:
+                     time_txt = f"{hours:.1f} Saat"
             
-            h_val = f_res['life_hours']
-            h_str = "Sonsuz" if h_val > 1e6 else f"{h_val:.1f} Saat"
-            f2.metric("Güvenli Çalışma Süresi", h_str, delta=f_res['risk'], delta_color="inverse")
+            f1.metric("Tahmini Ömür", cycle_txt)
+            f2.metric("Çalışma Süresi", time_txt)
             
-            f3.metric("Durum", f_res['status'])
+            r_level = f_res['risk_level']
+            r_delta = "off"
+            if r_level == "Yüksek Risk": r_delta = "inverse"
+            f3.metric("Risk Seviyesi", r_level, delta="Dikkat" if r_level!="Düşük Risk" else "Güvenli", delta_color=r_delta)
             
             # S-N Plot
-            from visuals import plot_sn_curve
-            fig_sn = plot_sn_curve(f_res['N'], f_res['sigma_calc'], f_res['Sut'], f_res['Se'], f_res['S1K'], fat_mat)
+            wp = f_res['wohler_params']
+            fig_sn = plot_sn_curve(
+                wp['Sut'], wp['Se'], wp['a'], wp['b'], 
+                f_res['sigma_amp'], f_res['life_cycles'], 
+                s_res['material']
+            )
             st.plotly_chart(fig_sn, use_container_width=True)
+            
+        else:
+            st.warning("Gerilme hesabı yapılamadı (Alan veya Kuvvet verisi eksik).")
+            
+    elif enable_stress and not enable_dynamics:
+        st.info("ℹ️ Mukavemet analizini görmek için lütfen sol panelden **'Dinamik Analiz'** seçeneğini de aktif ediniz.")
 
 
 

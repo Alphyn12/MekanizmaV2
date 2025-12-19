@@ -1,139 +1,98 @@
-
-"""
-YORULMA ANALIZİ (FATIGUE ANALYSIS) MODÜLÜ
-Bu modül, dinamik yükleme altındaki mekanizma uzuvlarının yorulma ömrünü tahmin eder.
-Yaklaşım: S-N Eğrisi (Wöhler) ve Basquin Denklemi.
-"""
 import numpy as np
+from materials import MATERIALS_DB
 
-# Malzeme Kütüphanesi
-# Sut: Çekme Dayanımı (Ultimate Tensile Strength) [MPa]
-# Se: Sürekli Mukavemet Sınırı (Endurance Limit) [MPa] (Yaklaşık 0.5 * Sut)
-# Celik için Se 10^6 çevrimde tanımlanır.
-FATIGUE_MATERIALS = {
-    "Celik (AISI 1050)": {"Sut": 690.0, "Se": 345.0},
-    "Aluminyum (6061-T6)": {"Sut": 310.0, "Se": 95.0}, # Alüminyumda gerçek bir Se yoktur, 5*10^8 aliyoruz
-    "Titanyum (Ti-6Al-4V)": {"Sut": 950.0, "Se": 500.0},
-    "Dökme Demir (G40)": {"Sut": 276.0, "Se": 110.0},
-    "Paslanmaz Celik (304)": {"Sut": 505.0, "Se": 210.0}
-}
-
-def calculate_fatigue_life(sigma_max, sigma_min, material_name, rpm):
+def calculate_fatigue_life(sigma_max, sigma_min, material_key, rpm):
     """
-    S-N Eğrisi yöntemine göre yorulma ömrünü hesaplar.
+    Basquin Denklemi ve Soderberg/Goodman kriterlerini kullanarak yorulma ömrü tahmini.
+    Basitleştirilmiş yaklaşım: Sadece gerilme genliği ve Wöhler eğrisi.
     
     Args:
-        sigma_max (float): Maksimum gerilme [MPa]
-        sigma_min (float): Minimum gerilme [MPa]
-        material_name (str): Malzeme ismi
-        rpm (float): Çalışma hızı [Devir/Dakika]
+        sigma_max (float): Maksimum Gerilme [MPa]
+        sigma_min (float): Minimum Gerilme [MPa]
+        material_key (str): Malzeme anahtarı
+        rpm (float): Çalışma hızı [devir/dak]
         
     Returns:
         dict: {
-            "N": float (Çevrim veya inf),
-            "life_hours": float (Saat),
-            "status": str (Risk durumu),
-            "sigma_a": float, "sigma_m": float,
-            "Se": float, "Sut": float
+            'life_cycles': float or string ("Sonsuz"),
+            'life_hours': float or string ("Sonsuz"),
+            'sigma_amp': float,
+            'sigma_mean': float,
+            'risk_level': str (High/Low/None)
         }
     """
-    props = FATIGUE_MATERIALS.get(material_name, FATIGUE_MATERIALS["Celik (AISI 1050)"])
-    Sut = props["Sut"]
-    Se = props["Se"]
+    mat = MATERIALS_DB.get(material_key, MATERIALS_DB["Celik_1050"])
+    Sut = mat['Sut']
+    Se = mat['Se']
     
-    # 1. Gerilme Parametreleri
-    # Stres değerleri mutlak büyüklük olarak değişkense de, 
-    # yorulma için işaretli değerlere ihtiyaç vardır (Basma/Çekme).
-    # Basit bir analiz için mutlak max kullanılırsa "Tam Değişken" (Fully Reversed) varsayabiliriz.
-    # Ancak burada sigma_max ve min parametre olarak geliyor.
+    # 1. Gerilme Bileşenleri
+    sigma_a = abs(sigma_max - sigma_min) / 2.0  # Genlik
+    sigma_m = (sigma_max + sigma_min) / 2.0     # Ortalama
     
-    # Basitlik için Amplitude (Genlik) odaklı analiz (Goodman düzeltmesi olmadan, S-N doğrudan usage)
-    # sigma_a = (sigma_max - sigma_min) / 2
-    # Muhafazakar yaklaşım: Goodman kullanmak yerine Max Stres üzerinden S-N bakmak 
-    # Veya sadece sigma_amp'yi Se ile karşılaştırmak (Fully Reversed Assumption).
-    # Genelde sigma_a kullanılır.
+    # 2. Goodman Düzeltmesi (Basitleştirilmiş: Ortalama gerilme etkisi ihmal edilebilir
+    # veya eşdeğer gerilme (S_eq) hesaplanabilir.
+    # Şimdilik direkt sigma_a üzerinden Wöhler eğrisi kullanalım, en temiz yöntem bu seviye için)
     
-    sigma_a = abs(sigma_max - sigma_min) / 2.0
-    sigma_m = (sigma_max + sigma_min) / 2.0
-
-    # Goodman Düzeltmesi ile Eşdeğer Gerilme (Equivalent Fully Reversed Stress)
-    # Se_req = sigma_a / (1 - sigma_m/Sut)
-    # Eğer sigma_m çok yüksekse ömür kısalır.
-    # Negatif sigma_m (Basma) genelde ömrü uzatır ama biz conservative formül kullanalım.
-    
-    sigma_eq = sigma_a
-    if sigma_m > 0: # Sadece çekme ortalama gerilmesi zararlıdır
-        denominator = (1 - sigma_m / Sut)
-        if denominator > 0.05: # Sıfıra bölme koruması
-            sigma_eq = sigma_a / denominator
-        else:
-            sigma_eq = Sut # Çok yüksek ortalama gerilme -> Kirilma
-            
-    # Eğer sigma_eq hesaplanan max değerden büyükse onu al
-    # Genelde basit analiz için sigma_eq yeterlidir.
-    
-    stress_val = sigma_eq
-    
-    # 2. Ömür Hesabı (Basquin S-N Model)
-    # N = 10^6 için Se
-    # N = 10^3 için 0.9 * Sut (Çelik için genelde)
-    
+    # Wöhler Eğrisi Parametreleri (Basitleştirilmiş Çelik için)
     # S = a * N^b
+    # Nokta 1: (N=10^3, S=0.9*Sut) (Düşük çevrim yorulması sınırı)
+    # Nokta 2: (N=10^6, S=Se) (Sürekli mukavemet sınırı)
+    
+    Sm_10_3 = 0.9 * Sut
+    Sm_10_6 = Se
+    
+    # Log-Log düzlemde eğim (b) ve katsayı (a)
     # log(S) = log(a) + b * log(N)
+    # b = (log(S2) - log(S1)) / (log(N2) - log(N1))
     
-    S1 = 0.9 * Sut # 1000 çevrimdeki mukavemet
-    N1 = 1000.0
+    log_N1 = 3.0 # 10^3
+    log_N2 = 6.0 # 10^6
     
-    S2 = Se # 10^6 (veya Al için 5*10^8)
-    N2 = 1.0e6
-    if "Aluminyum" in material_name: N2 = 5.0e8
+    log_S1 = np.log10(Sm_10_3)
+    log_S2 = np.log10(Sm_10_6)
     
-    # Eğer gerilme Se altındaysa -> Sonsuz Ömür
-    if stress_val < Se:
-        life_N = float('inf')
-        hours = float('inf')
-        status = "SONSUZ ÖMÜR (Güvenli)"
-        risk = "DÜŞÜK"
-    elif stress_val > S1:
-        # Çok yüksek gerilme, Low Cycle Fatigue veya Statik Hasar
-        life_N = 1.0 # Anlık hasar
-        hours = 0.0
-        status = "ANLIK HASAR RISKI (Statik)"
-        risk = "KRİTİK"
+    b = (log_S2 - log_S1) / (log_N2 - log_N1)
+    # log(S1) = log(a) + b * 3 => log(a) = log(S1) - 3b
+    log_a = log_S1 - 3.0 * b
+    a = 10**log_a
+    
+    # 3. Ömür Hesabı
+    # sigma_a = a * N^b  =>  N = (sigma_a / a)^(1/b)
+    
+    stress_to_check = sigma_a
+    
+    life_cycles = 0
+    life_hours = 0
+    risk = "Bilinmiyor"
+    
+    if stress_to_check < Se:
+        life_cycles = float('inf')
+        risk = "Yok (Sonsuz Ömür)"
+    elif stress_to_check > 0.9 * Sut:
+        # Çok yüksek gerilme, hemen kırılır (Statik hasar bölgesine yakın)
+        life_cycles = 1 # Hemen hemen anında
+        risk = "Çok Yüksek (Statik Hasar Riski)"
     else:
-        # Sonlu Ömür Bölgesi (Finite Life)
-        # b = log(S1/S2) / log(N1/N2)
-        import math
-        b = math.log10(S1 / S2) / math.log10(N1 / N2)
-        a = S1 / (N1 ** b)
+        # Sonlu Ömür Bölgesi
+        N = (stress_to_check / a) ** (1.0 / b)
+        life_cycles = N
+        risk = "Orta (Sonlu Ömür)"
         
-        # S = a * N^b  =>  N = (S/a)^(1/b)
-        life_N = (stress_val / a) ** (1.0 / b)
-        
-        # Süre Hesabı
+    # Saate Çevirme
+    # Saat = N / (RPM * 60)
+    if life_cycles == float('inf'):
+        life_hours = float('inf')
+    else:
         if rpm > 0:
-            minutes = life_N / rpm
-            hours = minutes / 60.0
+            life_hours = life_cycles / (rpm * 60.0)
         else:
-            hours = float('inf')
+            life_hours = float('inf') # Hareket yoksa ömür gitmez :)
             
-        if life_N < 1e5:
-            risk = "YÜKSEK"
-            status = "KISA ÖMÜR"
-        elif life_N < 1e6:
-            risk = "ORTA"
-            status = "SINIRLI ÖMÜR"
-        else:
-            risk = "DÜŞÜK"
-            status = "UZUN ÖMÜR"
-
     return {
-        "N": life_N,
-        "life_hours": hours,
-        "status": status,
-        "risk": risk,
-        "sigma_calc": stress_val,
-        "Sut": Sut,
-        "Se": Se,
-        "S1K": S1 # 1000 cycle strength
+        'life_cycles': life_cycles,
+        'life_hours': life_hours,
+        'sigma_amp': sigma_a,
+        'sigma_mean': sigma_m,
+        'risk_level': risk,
+        'wohler_params': {'a': a, 'b': b, 'Se': Se, 'Sut': Sut} # Plotting için
     }

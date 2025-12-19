@@ -109,7 +109,7 @@ def create_pin_hardware(x, y, z_min, z_max, radius):
     mat = MATERIALS['Pin']
     return create_cylinder_mesh(x, y, z_min, z_max, radius, mat['color'], "Pin", mat)
 
-def draw_mechanism_3d(joints, mech_type, show_pins=True, show_grid=True, thickness=5.0, camera_view="ISO"):
+def draw_mechanism_3d(joints, mech_type, show_pins=True, show_grid=True, thickness=5.0, camera_view="ISO", trace_path=None):
     fig = go.Figure()
     
     w_link = thickness * 2.5
@@ -161,23 +161,71 @@ def draw_mechanism_3d(joints, mech_type, show_pins=True, show_grid=True, thickne
     for t in traces:
         if t: fig.add_trace(t)
 
+    # --- TRACE PATH ---
+    if trace_path and len(trace_path) > 1:
+        tx = [p[0] for p in trace_path]
+        ty = [p[1] for p in trace_path]
+        tz = [p[2] for p in trace_path]
+        
+        fig.add_trace(go.Scatter3d(
+            x=tx, y=ty, z=tz,
+            mode='lines',
+            line=dict(color='#FFFF00', width=5), # Neon Yellow, Thick
+            name='Yörünge'
+        ))
+
+    # --- DYNAMIC ZOOM & BOUNDING BOX ---
+    # 1. Collect all joint coordinates to find bounds
+    all_x, all_y = [], []
+    
+    def collect_pts(pt_list):
+        for p in pt_list:
+            if p: all_x.append(p[0]); all_y.append(p[1])
+
+    if mech_type == "Dört Çubuk Mekanizması":
+        if 'O2' in joints: collect_pts([joints['O2'], joints['A'], joints['B'], joints['O4']])
+    elif mech_type == "Krank-Biyel Mekanizması":
+        if 'O2' in joints: collect_pts([joints['O2'], joints['B'], joints['C']])
+    elif mech_type == "Kol-Kızak (Whitworth) Mekanizması":
+        if 'O2' in joints: collect_pts([joints['O2'], joints['O4'], joints['A'], joints['B']])
+        
+    if not all_x: # Fallback if empty
+        all_x = [-50, 250]; all_y = [-50, 150]
+
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    
+    # 2. Add Padding (e.g., 20% of span)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    max_span = max(span_x, span_y)
+    
+    pad = max_span * 0.2
+    if pad < 20: pad = 20
+    
+    # New Explicit Ranges specific to THIS mechanism's size
+    target_x_range = [min_x - pad, max_x + pad]
+    target_y_range = [min_y - pad, max_y + pad]
+    
+    # Auto-Calculate Z Range to keep 1:1 Aspect Ratio
+    # If X-Span is 300mm, we want Z to be reasonable (e.g. 100mm height)
+    # But usually Z is small (10-20mm). 
+    # To show the grid "box" nicely, we define Z-Height relative to max_span.
+    z_height = max_span * 0.4 # 40% of width
+    target_z_range = [-z_height * 0.2, z_height * 0.8] # floor at -20%
+    
     # --- CAMERAS ---
+    # Update ON view to be default front.
     cameras = {
         "ISO": dict(eye=dict(x=0.8, y=-1.5, z=0.8), up=dict(x=0, y=0, z=1)),
-        "ON":  dict(eye=dict(x=0, y=0, z=2.5), up=dict(x=0, y=1, z=0)),
+        "ON":  dict(eye=dict(x=0, y=0, z=2.0), up=dict(x=0, y=1, z=0)), # Look from +Z down
         "UST": dict(eye=dict(x=0, y=-2.5, z=0.1), up=dict(x=0, y=0, z=1)),
         "YAN": dict(eye=dict(x=2.5, y=0, z=0), up=dict(x=0, y=0, z=1))
     }
-    sel_cam = cameras.get(camera_view, cameras["ISO"])
+    sel_cam = cameras.get(camera_view, cameras["ISO"]) # Default ISO if unknown, but App sets default.
 
-    # --- PERFECT GRID ROOM LOGIC (REVERTED TO STEP 118 LOGIC) ---
-    
-    GRID_STEP = 20 # 20mm grid spacing
-    
-    # Explicit Ranges defined in prompt
-    X_RANGE = [-50, 350] 
-    Y_RANGE = [-100, 200]
-    Z_RANGE = [-20, 100]  
+    # --- GRID STYLING ---
+    GRID_STEP = 20 # Keep 20mm ticks
     
     grid_style = dict(
         showbackground=True,
@@ -187,17 +235,17 @@ def draw_mechanism_3d(joints, mech_type, show_pins=True, show_grid=True, thickne
         zerolinecolor='#555555',
         zerolinewidth=2,
         visible=show_grid,
-        dtick=GRID_STEP, # FORCE SYNCHRONIZED TICKS
-        range=None,      # Will be set per axis
+        dtick=GRID_STEP,
+        range=None,
         showticklabels=True,
         tickfont=dict(color='#666666', size=10),
         title=''
     )
     
-    # Clone and set ranges
-    x_ax = grid_style.copy(); x_ax['range'] = X_RANGE
-    y_ax = grid_style.copy(); y_ax['range'] = Y_RANGE
-    z_ax = grid_style.copy(); z_ax['range'] = Z_RANGE
+    # Apply Calculated Ranges
+    x_ax = grid_style.copy(); x_ax['range'] = target_x_range
+    y_ax = grid_style.copy(); y_ax['range'] = target_y_range
+    z_ax = grid_style.copy(); z_ax['range'] = target_z_range
     
     fig.update_layout(
         scene=dict(
@@ -205,7 +253,7 @@ def draw_mechanism_3d(joints, mech_type, show_pins=True, show_grid=True, thickne
             yaxis=y_ax,
             zaxis=z_ax,
             bgcolor='#0E1117',
-            aspectmode='data', # Keeps the 1:1:1 ratio
+            aspectmode='data', # Critical for 1:1 proportion
             camera=dict(up=sel_cam['up'], center=dict(x=0, y=0, z=0), eye=sel_cam['eye'])
         ),
         paper_bgcolor='#0E1117',

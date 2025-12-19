@@ -927,78 +927,67 @@ def plot_transmission_angle(theta2_range, mu_list):
     fig.update_layout(title="<b>Bağlama Açısı</b>", template="plotly_dark")
     return fig
 
-def plot_sn_curve(N_calc, stress_calc, Sut, Se, S1K, material_name):
+def plot_sn_curve(Sut, Se, a, b, operating_sigma, operating_cycles, material_name):
     """
-    S-N (Wöhler) Eğrisini ve çalışma noktasını çizer.
+    Plots the S-N (Wöhler) Curve using pre-calculated parameters.
     """
     import plotly.graph_objects as go
-    import math
-    import numpy as np # Assuming numpy is imported elsewhere, but adding here for self-containment if not.
-    
-    # 1. S-N Curve Points
-    # Range from 10^3 to 10^8
-    n_points = np.logspace(3, 8, 100)
-    s_points = []
-    
-    # Calculate S for each N based on Basquin logic
-    # S1K at 10^3, Se at 10^6 (or 10^8 for Al)
-    limit_N = 1e6
-    if "Aluminyum" in material_name: limit_N = 5e8
-    
-    # b calculation
-    b = math.log10(S1K / Se) / math.log10(1000.0 / limit_N)
-    a = S1K / (1000.0 ** b)
-    
-    for n in n_points:
-        if n < limit_N:
-             s = a * (n ** b)
-        else:
-             s = Se # Endurance Limit plateau
-        s_points.append(s)
-        
-    s_points = np.array(s_points)
+    import numpy as np 
     
     fig = go.Figure()
     
-    # Limit Curve
+    # 1. Generate S-N Line (10^3 to 10^7)
+    N_range = np.logspace(3, 7, 100)
+    S_range = a * (N_range ** b)
+    
+    # Clip S range to not go below Se (theoretically constant after 10^6)
+    S_curve = []
+    for n_val, s_val in zip(N_range, S_range):
+        if s_val < Se:
+            S_curve.append(Se)
+        else:
+            S_curve.append(s_val)
+            
+    # Main Curve
     fig.add_trace(go.Scatter(
-        x=n_points, y=s_points,
-        mode='lines', name=f'{material_name} S-N Eğrisi',
-        line=dict(color='cyan', width=3)
+        x=N_range, y=S_curve,
+        mode='lines',
+        name=f'{material_name} Limit',
+        line=dict(color='#00E676', width=3)
     ))
     
-    # Operating Point
-    # Check if infinite
-    if N_calc > 1e8: 
-        disp_N = 1e8
-        text_N = "Sonsuz"
+    # 2. Operating Point
+    # Handle Infinite Life for plotting
+    plot_cycles = operating_cycles
+    if operating_cycles == float('inf') or operating_cycles > 1e7:
+        plot_cycles = 1e7 # Cap at graph end
+        point_text = "Sonsuz Ömür"
     else:
-        disp_N = N_calc
-        text_N = f"{N_calc:.1e}"
+        point_text = f"Ömür: {int(operating_cycles):,} Çevrim"
         
-    color_pt = 'red' if stress_calc > Se else 'lime'
-    
     fig.add_trace(go.Scatter(
-        x=[disp_N], y=[stress_calc],
+        x=[plot_cycles], y=[operating_sigma],
         mode='markers+text',
-        name='Çalışma Noktası',
-        text=[f"Stres: {stress_calc:.1f} MPa<br>Ömür: {text_N}"],
-        textposition="top center",
-        marker=dict(size=14, color=color_pt, symbol='x')
+        marker=dict(color='#FF1744', size=15, symbol='x'),
+        text=[point_text], textposition="top right",
+        name='Çalışma Noktası'
     ))
     
-    # Annotations
-    fig.add_hline(y=Se, line_dash="dash", line_color="yellow", annotation_text="Sürekli Mukavemet (Se)")
-    fig.add_hline(y=Sut, line_dash="dash", line_color="red", annotation_text="Çekme Dayanımı (Sut)")
-
+    # 3. Limit Lines
+    fig.add_hline(y=Se, line_dash="dash", line_color="gray", annotation_text="Sürekli Mukavemet (Se)")
+    fig.add_hline(y=Sut, line_dash="dash", line_color="#FF9100", annotation_text="Çekme Dayanımı (Sut)")
+    
     fig.update_layout(
-        title="Yorulma Analizi: S-N (Wöhler) Diyagramı",
-        xaxis_title="Çevrim Sayısı (N) [Logaritmik]",
+        title="Yorulma Analizi (S-N Diyagramı)",
+        xaxis_title="Ömür (Çevrim) - Logaritmik",
         yaxis_title="Gerilme Genliği (MPa)",
         xaxis_type="log",
         template="plotly_dark",
-        height=500,
-        showlegend=True
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
     )
     
     return fig
